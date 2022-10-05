@@ -49,6 +49,51 @@ class slcanBus(BusABC):
         83300: "S9",
     }
 
+    _FD_BITRATES = {
+        2000000: "Y2",
+        5000000: "Y5",
+    }
+
+    # Lookup for decoding length
+    _SLCAN_LENCODE_TO_BYTES = {
+        '0': 0,
+        '1': 1,
+        '2': 2,
+        '3': 3,
+        '4': 4,
+        '5': 5,
+        '6': 6, 
+        '7': 7,
+        '8': 8,
+        '9': 12,
+        'A': 16,
+        'B': 20,
+        'C': 24,
+        'D': 32,
+        'E': 48,
+        'F': 64
+    }
+
+    # Lookup for encoding length
+    _SLCAN_BYTES_TO_LENCODE = {
+        0: '0',
+        1: '1',
+        2: '2',
+        3: '3',
+        4: '4',
+        5: '5',
+        6: '6',
+        7: '7',
+        8: '8',
+        12: '9',
+        16: 'A',
+        20: 'B',
+        24: 'C',
+        32: 'D',
+        48: 'E',
+        64: 'F',
+    }
+
     _SLEEP_AFTER_SERIAL_OPEN = 2  # in seconds
 
     _OK = b"\r"
@@ -61,6 +106,7 @@ class slcanBus(BusABC):
         channel: typechecking.ChannelStr,
         ttyBaudrate: int = 115200,
         bitrate: Optional[int] = None,
+        bitrate_fd: Optional[int] = None,
         btr: Optional[str] = None,
         sleep_after_open: float = _SLEEP_AFTER_SERIAL_OPEN,
         rtscts: bool = False,
@@ -74,6 +120,8 @@ class slcanBus(BusABC):
             baudrate of underlying serial or usb device (Ignored if set via the ``channel`` parameter)
         :param bitrate:
             Bitrate in bit/s
+        :param bitrate_fd:
+            Data bitrate of FD BRS messages in bit/s
         :param btr:
             BTR register value to set custom can speed
         :param poll_interval:
@@ -112,11 +160,32 @@ class slcanBus(BusABC):
                 self.set_bitrate(bitrate)
             if btr is not None:
                 self.set_bitrate_reg(btr)
+            if bitrate_fd is not None:
+                self.set_bitrate_fd(bitrate_fd)
             self.open()
 
         super().__init__(
             channel, ttyBaudrate=115200, bitrate=None, rtscts=False, **kwargs
         )
+
+
+    def set_bitrate_fd(self, bitrate: int) -> None:
+        """
+        :param bitrate:
+            FD Data Bitrate in bit/s
+
+        :raise ValueError: if ``bitrate`` is not among the possible values
+        """
+        if bitrate in self._FD_BITRATES:
+            bitrate_code = self._FD_BITRATES[bitrate]
+        else:
+            bitrates = ", ".join(str(k) for k in self._FD_BITRATES.keys())
+            raise ValueError(f"Invalid FD data bitrate, choose one of {bitrates}.")
+
+        self.close()
+        self._write(bitrate_code)
+        self.open()
+
 
     def set_bitrate(self, bitrate: int) -> None:
         """
@@ -204,6 +273,8 @@ class slcanBus(BusABC):
         canId = None
         remote = False
         extended = False
+        fd = False
+        brs = False
         frame = []
 
         string = self._read(timeout)
@@ -234,6 +305,39 @@ class slcanBus(BusABC):
             dlc = int(string[9])
             extended = True
             remote = True
+        elif string[0] == "D":
+            # FD extended frame, no BRS
+            fd = True
+            canId = int(string[1:9], 16)
+            dlc = self._SLCAN_LENCODE_TO_BYTES[string[9]] # encode/decode DLC
+            extended = True
+            for i in range(0, dlc):
+                frame.append(int(string[10 + i * 2 : 12 + i * 2], 16))
+        elif string[0] == "d":
+            # FD normal frame, no BRS
+            fd = True
+            canId = int(string[1:4], 16)
+            dlc = self._SLCAN_LENCODE_TO_BYTES[string[4]] # encode/decode DLC
+            for i in range(0, dlc):
+                frame.append(int(string[5 + i * 2 : 7 + i * 2], 16))
+        elif string[0] == "B":
+            # FD extended frame, BRS
+            fd = True
+            brs = True
+            canId = int(string[1:9], 16)
+            dlc = self._SLCAN_LENCODE_TO_BYTES[string[9]] # encode/decode DLC
+            extended = True
+            for i in range(0, dlc):
+                frame.append(int(string[10 + i * 2 : 12 + i * 2], 16))
+        elif string[0] == "b":
+            # FD normal frame, BRS
+            fd = True
+            brs = True
+            canId = int(string[1:4], 16)
+            dlc = self._SLCAN_LENCODE_TO_BYTES[string[4]] # encode/decode DLC
+            for i in range(0, dlc):
+                frame.append(int(string[5 + i * 2 : 7 + i * 2], 16))
+
 
         if canId is not None:
             msg = Message(
@@ -241,26 +345,52 @@ class slcanBus(BusABC):
                 is_extended_id=extended,
                 timestamp=time.time(),  # Better than nothing...
                 is_remote_frame=remote,
+                is_fd = fd,
+                bitrate_switch = brs,
                 dlc=dlc,
                 data=frame,
             )
             return msg, False
         return None, False
 
+
+
+
     def send(self, msg: Message, timeout: Optional[float] = None) -> None:
         if timeout != self.serialPortOrig.write_timeout:
             self.serialPortOrig.write_timeout = timeout
-        if msg.is_remote_frame:
-            if msg.is_extended_id:
-                sendStr = "R%08X%d" % (msg.arbitration_id, msg.dlc)
-            else:
-                sendStr = "r%03X%d" % (msg.arbitration_id, msg.dlc)
+
+        if msg.is_fd:
+            try:
+                if msg.bitrate_switch:
+                    if msg.is_extended_id:
+                        sendStr = "B%08X%s" % (msg.arbitration_id, self._SLCAN_BYTES_TO_LENCODE[msg.dlc])
+                    else:
+                        sendStr = "b%03X%s" % (msg.arbitration_id, self._SLCAN_BYTES_TO_LENCODE[msg.dlc])
+                    sendStr += "".join(["%02X" % b for b in msg.data])
+                else:
+                    if msg.is_extended_id:
+                        sendStr = "D%08X%s" % (msg.arbitration_id, self._SLCAN_BYTES_TO_LENCODE[msg.dlc])
+                    else:
+                        sendStr = "d%03X%s" % (msg.arbitration_id, self._SLCAN_BYTES_TO_LENCODE[msg.dlc])
+                    sendStr += "".join(["%02X" % b for b in msg.data])
+
+            except KeyError as e:
+                print("Invalid DLC specified (" + str(msg.dlc) + ". Please choose valid DLC (0-8, 12, 16, 20, 24, 32, 48, 64)")
+
+
         else:
-            if msg.is_extended_id:
-                sendStr = "T%08X%d" % (msg.arbitration_id, msg.dlc)
+            if msg.is_remote_frame:
+                if msg.is_extended_id:
+                    sendStr = "R%08X%d" % (msg.arbitration_id, msg.dlc)
+                else:
+                    sendStr = "r%03X%d" % (msg.arbitration_id, msg.dlc)
             else:
-                sendStr = "t%03X%d" % (msg.arbitration_id, msg.dlc)
-            sendStr += "".join(["%02X" % b for b in msg.data])
+                if msg.is_extended_id:
+                    sendStr = "T%08X%d" % (msg.arbitration_id, msg.dlc)
+                else:
+                    sendStr = "t%03X%d" % (msg.arbitration_id, msg.dlc)
+                sendStr += "".join(["%02X" % b for b in msg.data])
         self._write(sendStr)
 
     def shutdown(self) -> None:
