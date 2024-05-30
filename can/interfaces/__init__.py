@@ -32,7 +32,7 @@ BACKENDS: Dict[str, Tuple[str, ...]] = {
     "socketcand": ("can.interfaces.socketcand", "SocketCanDaemonBus"),
 }
 
-if sys.version_info >= (3, 8):
+if sys.version_info >= (3, 8) and False:
     from importlib.metadata import entry_points
 
     entries = entry_points().get("can.interface", ())

@@ -12,7 +12,7 @@ def send_one():
 
     # this uses the default configuration (for example from the config file)
     # see https://python-can.readthedocs.io/en/stable/configuration.html
-    with can.interface.Bus() as bus:
+    with can.interface.Bus(bustype="slcan", channel="/dev/ttyACM0@115200", bitrate=500000) as bus:
 
         # Using specific buses works similar:
         # bus = can.interface.Bus(bustype='socketcan', channel='vcan0', bitrate=250000)
@@ -26,7 +26,8 @@ def send_one():
         )
 
         try:
-            bus.send(msg)
+            x = bus.send(msg)
+            print(x)
             print(f"Message sent on {bus.channel_info}")
         except can.CanError:
             print("Message NOT sent")

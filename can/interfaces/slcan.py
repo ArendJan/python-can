@@ -290,6 +290,9 @@ class slcanBus(BusABC):
                 frame.append(int(string[10 + i * 2 : 12 + i * 2], 16))
         elif string[0] == "t":
             # normal frame
+            print(string)
+            if(string[1] == "t"):
+                string = string[1:]
             canId = int(string[1:4], 16)
             dlc = int(string[4])
             for i in range(0, dlc):
